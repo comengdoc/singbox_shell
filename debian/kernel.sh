@@ -5,9 +5,14 @@
 
 set -euo pipefail
 
+# 定义颜色以便提示更醒目
+RED='\033[0;31m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Color
+
 # 错误处理函数
 error() {
-    echo "错误: $1" >&2
+    echo -e "${RED}错误: $1${NC}" >&2
     exit 1
 }
 
@@ -15,6 +20,30 @@ error() {
 if [ "$(id -u)" -ne 0 ]; then
     error "必须以 root 用户运行此脚本。"
 fi
+
+# ==========================================
+# 核心修改：架构兼容性安全检查
+# ==========================================
+ARCH=$(dpkg --print-architecture)
+echo "正在检查系统架构..."
+
+if [[ "$ARCH" != "amd64" ]]; then
+    echo -e "${RED}======================================================${NC}"
+    echo -e "${RED}  严重警告：不支持的系统架构 ($ARCH)  ${NC}"
+    echo -e "${RED}======================================================${NC}"
+    echo -e "${YELLOW}XanMod 内核官方仅支持 x86_64 (amd64) 架构的设备。${NC}"
+    echo -e "${YELLOW}检测到您正在 ARM 架构设备（如树莓派、NanoPi、软路由盒子）上运行。${NC}"
+    echo -e "${YELLOW}在此设备上强制安装 x86 内核会导致：${NC}"
+    echo -e "  1. 系统无法引导 (变砖)"
+    echo -e "  2. 必须拆机取出 TF 卡/硬盘重刷系统"
+    echo -e ""
+    echo -e "${RED}为了您的系统安全，脚本已自动终止。${NC}"
+    echo -e "Armbian 请直接使用 armbian-config 或官方源更新内核。"
+    exit 1
+else
+    echo -e "架构检查通过：$ARCH (支持 XanMod)"
+fi
+# ==========================================
 
 # 更新软件包列表
 echo "正在更新软件包列表..."
@@ -79,6 +108,7 @@ has_flags() {
 }
 
 # 根据指令集判断 CPU 级别
+# 注意：以下指令集判断仅适用于 x86 架构
 if has_flags "avx512f avx512bw avx512cd avx512dq avx512vl"; then
     level=4
 elif has_flags "avx avx2 bmi1 bmi2 f16c fma abm movbe xsave"; then
@@ -117,6 +147,7 @@ echo "正在安装 $kernel_package..."
 apt install "$kernel_package" -y || error "安装 $kernel_package 失败。"
 
 # 提示系统重启
+echo -e "${YELLOW}内核安装完成！${NC}"
 echo "系统将在 10 秒后重启，按 Ctrl+C 可取消。"
 for i in {10..1}; do
     echo "$i..."
