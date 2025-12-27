@@ -1,48 +1,58 @@
 #!/bin/bash
 
-# 配置参数
+# --- 配置参数 ---
 PROXY_FWMARK=1
 PROXY_ROUTE_TABLE=100
-INTERFACE=$(ip route show default | awk '/default/ {print $5}')
+INTERFACE=$(ip -4 route show default | grep default | awk '{print $5}' | head -n 1)
 
-# 读取当前模式
-MODE=$(grep -oP '(?<=^MODE=).*' /etc/sing-box/mode.conf)
+# 颜色
+CYAN='\033[0;36m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m'
 
-# 清理 TProxy 模式的防火墙规则
-clearTProxyRules() {
+# 读取模式
+if [ -f "/etc/sing-box/mode.conf" ]; then
+    MODE=$(grep "^MODE=" /etc/sing-box/mode.conf | cut -d'=' -f2)
+else
+    MODE=""
+fi
+
+# 清理 TProxy 残留
+cleanup_tproxy() {
+    echo -e "${CYAN}清理 TProxy 路由和规则...${NC}"
+    # 清理 nftables 表
     nft list table inet sing-box >/dev/null 2>&1 && nft delete table inet sing-box
-    ip rule del fwmark $PROXY_FWMARK lookup $PROXY_ROUTE_TABLE 2>/dev/null
+    
+    # 清理路由策略
+    while ip rule show | grep -q "lookup $PROXY_ROUTE_TABLE"; do
+        ip rule del fwmark $PROXY_FWMARK lookup $PROXY_ROUTE_TABLE 2>/dev/null
+    done
+    
+    # 清理路由表
     ip route del local default dev "$INTERFACE" table $PROXY_ROUTE_TABLE 2>/dev/null
-    echo "清理 TProxy 模式的防火墙规则"
 }
 
 if [ "$MODE" = "TUN" ]; then
-    echo "应用 TUN 模式下的防火墙规则..."
+    echo -e "${CYAN}正在配置 TUN 模式环境...${NC}"
 
-    # 清理 TProxy 模式的防火墙规则
-    clearTProxyRules
+    # 1. 彻底清理 TProxy 规则 (防止冲突)
+    cleanup_tproxy
 
-    # 确保目录存在
+    # 2. 配置 TUN 专用防火墙 (可选)
+    # 注意：TUN 模式通常由 sing-box 自身创建 tun0 接口并配置路由
+    # 这里我们只需确保没有干扰规则。
+    # 不要使用 flush ruleset！这会清除 SSH 访问规则！
+    
     sudo mkdir -p /etc/sing-box/tun
+    
+    # 如果需要确保转发正常，可以单独开启
+    sysctl -w net.ipv4.ip_forward=1 > /dev/null
 
-    # 设置 TUN 模式的具体配置
-    cat > /etc/sing-box/tun/nftables.conf <<EOF
-# 清除现有的 nftables 规则并应用新的配置
-flush ruleset
-table inet filter {
-    chain input { type filter hook input priority 0; policy accept; }
-    chain forward { type filter hook forward priority 0; policy accept; }
-    chain output { type filter hook output priority 0; policy accept; }
-}
-EOF
-
-    # 应用防火墙规则
-    nft -f /etc/sing-box/tun/nftables.conf
-
-    # 持久化防火墙规则
-    nft list ruleset > /etc/nftables.conf
-
-    echo "TUN 模式的防火墙规则已应用。"
+    # 3. 保存状态
+    # 仅在确实有改动时保存，TUN模式通常依赖 auto 路由，这里仅做清理即可
+    echo -e "${GREEN}✓ TUN 模式环境准备就绪 (TProxy 规则已清理)。${NC}"
+    
 else
-    echo "当前模式不是 TUN 模式，跳过防火墙规则配置。" >/dev/null 2>&1
+    echo -e "${YELLOW}当前非 TUN 模式，跳过配置。${NC}"
 fi

@@ -1,47 +1,70 @@
 #!/bin/bash
 
+# --- 样式定义 ---
 CYAN='\033[0;36m'
 GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
 RED='\033[0;31m'
+YELLOW='\033[1;33m'
 NC='\033[0m'
 
-CONFIG_DIR="/etc/sing-box"
-CONFIG_FILE="${CONFIG_DIR}/config.json"
-CONFIG_URL_FILE="${CONFIG_DIR}/config.url"
-DEFAULT_CONFIG_URL="https://raw.githubusercontent.com/comengdoc/singbox_shell/refs/heads/main/config/server/config.json"
+CONFIG_FILE="/etc/sing-box/config.json"
+MANUAL_FILE="/etc/sing-box/manual.conf"
+SCRIPT_DIR="/etc/sing-box/scripts"
 
-if [ ! -d "$CONFIG_DIR" ]; then
-    echo -e "${RED}sing-box 未安装或配置文件目录不存在，请先执行安装。${NC}"
-    exit 1
+echo -e "${CYAN}=== Sing-box 配置更新 ===${NC}"
+
+# 策略：优先使用 manual.conf 中的订阅信息重新生成，
+# 如果没有订阅信息，才去下载静态链接。
+
+if [ -f "$MANUAL_FILE" ]; then
+    echo -e "${GREEN}检测到订阅配置文件 (manual.conf)。${NC}"
+    echo -e "${CYAN}正在调用订阅更新脚本...${NC}"
+    
+    # 直接调用 manual_update.sh，复用其逻辑
+    if [ -f "$SCRIPT_DIR/manual_update.sh" ]; then
+        bash "$SCRIPT_DIR/manual_update.sh"
+        exit $?
+    else
+        echo -e "${RED}错误: 找不到 manual_update.sh 脚本。${NC}"
+        # Fallback to logic below
+    fi
 fi
 
-config_url=""
+# --- 如果没有订阅配置，走静态链接逻辑 ---
+
+CONFIG_URL_FILE="/etc/sing-box/config.url"
+DEFAULT_URL="https://raw.githubusercontent.com/comengdoc/singbox_shell/refs/heads/main/config/server/config.json"
+
+echo -e "${YELLOW}未检测到动态订阅配置，将使用直接下载模式。${NC}"
+
+# 读取或请求 URL
 if [ -s "$CONFIG_URL_FILE" ]; then
-    config_url=$(cat "$CONFIG_URL_FILE")
-    echo -e "${YELLOW}当前配置链接为: ${NC}$config_url"
-    read -rp "是否更换配置链接? (y/N): " change_url
-    if [[ "$change_url" =~ ^[Yy]$ ]]; then
-        read -rp "请输入新的配置链接: " config_url
+    URL=$(cat "$CONFIG_URL_FILE")
+    echo -e "当前来源: ${YELLOW}$URL${NC}"
+    read -rp "是否修改下载链接? (y/n): " change
+    if [[ "$change" =~ ^[Yy]$ ]]; then
+        read -rp "新链接: " URL
+        echo "$URL" > "$CONFIG_URL_FILE"
     fi
 else
-    read -rp "首次使用,请输入配置链接 [回车使用默认]: " config_url
-    [ -z "$config_url" ] && config_url="$DEFAULT_CONFIG_URL"
+    read -rp "请输入配置下载链接 [回车使用默认]: " URL
+    URL=${URL:-$DEFAULT_URL}
+    echo "$URL" > "$CONFIG_URL_FILE"
 fi
 
-if [ -z "$config_url" ]; then
-    echo -e "${RED}配置链接不能为空，操作已取消。${NC}"
-    exit 1
-fi
+# 下载
+echo -e "${CYAN}正在下载...${NC}"
+cp "$CONFIG_FILE" "${CONFIG_FILE}.bak" 2>/dev/null
 
-echo -e "${CYAN}正在从以下链接下载配置文件: ${NC}$config_url"
-if wget -O "$CONFIG_FILE" --no-check-certificate "$config_url"; then
-    echo -e "${GREEN}配置文件下载成功！${NC}"
-    echo "$config_url" > "$CONFIG_URL_FILE"
-    echo -e "${CYAN}正在重启 sing-box 服务...${NC}"
-    systemctl restart sing-box
-    echo -e "${GREEN}服务已重启。${NC}"
+if wget -q -O "$CONFIG_FILE" "$URL"; then
+    if sing-box check -c "$CONFIG_FILE" >/dev/null 2>&1; then
+        echo -e "${GREEN}✓ 下载并验证成功。${NC}"
+        systemctl restart sing-box
+    else
+        echo -e "${RED}✗ 配置格式错误，已回滚。${NC}"
+        mv "${CONFIG_FILE}.bak" "$CONFIG_FILE"
+    fi
 else
-    echo -e "${RED}配置文件下载失败，请检查链接是否正确或网络连接。${NC}"
-    exit 1
+    echo -e "${RED}✗ 下载失败。${NC}"
+    mv "${CONFIG_FILE}.bak" "$CONFIG_FILE"
 fi

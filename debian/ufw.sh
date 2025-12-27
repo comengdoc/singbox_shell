@@ -1,97 +1,81 @@
 #!/bin/bash
 
-# 定义颜色
+# --- 样式定义 ---
 CYAN='\033[0;36m'
 GREEN='\033[0;32m'
 RED='\033[0;31m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
-# --- 非交互式/自动模式 ---
+# --- 自动模式 ---
 if [ "$1" == "--auto" ]; then
-    # 确保 UFW 已安装
     if ! command -v ufw &>/dev/null; then
-        sudo apt-get update >/dev/null 2>&1
-        sudo apt-get install -y ufw >/dev/null 2>&1
+        apt-get update -qq && apt-get install -y ufw
     fi
-    # 应用基本规则
-    sudo ufw default deny incoming >/dev/null
-    sudo ufw default allow outgoing >/dev/null
-    sudo ufw allow ssh >/dev/null
-    sudo ufw allow http >/dev/null
-    sudo ufw allow https >/dev/null
-    # 强制启用
-    sudo ufw --force enable >/dev/null
+    ufw default deny incoming
+    ufw default allow outgoing
+    ufw allow ssh
+    ufw allow 80/tcp
+    ufw allow 443/tcp
+    echo "y" | ufw enable
     exit 0
 fi
 
-# --- 交互式模式 ---
+# --- 交互模式 ---
+echo -e "${CYAN}=== UFW 防火墙配置工具 ===${NC}"
 
-# 1. 更新和安装
-echo -e "${CYAN}正在更新软件包列表...${NC}"
-sudo apt-get update >/dev/null 2>&1
-
+# 1. 安装检查
 if ! command -v ufw &>/dev/null; then
-    echo -e "${CYAN}正在安装 UFW 防火墙...${NC}"
-    if sudo apt-get install -y ufw >/dev/null 2>&1; then
-        echo -e "${GREEN}UFW 安装成功。${NC}"
-    else
-        echo -e "${RED}UFW 安装失败！请检查 apt 源或手动安装。${NC}"
-        exit 1
-    fi
+    echo -e "${YELLOW}正在安装 UFW...${NC}"
+    apt-get update -qq && apt-get install -y ufw
 else
-    echo -e "${GREEN}UFW 已安装，跳过安装步骤。${NC}"
+    echo -e "${GREEN}UFW 已安装。${NC}"
 fi
 
-# 2. 手动放行端口
-echo -e "\n${CYAN}请输入需要放行的端口（支持多个，用空格或英文逗号分隔）：${NC}"
-read -rp "要放行的端口: " ports_input
+# 2. 基础规则
+echo -e "${CYAN}正在应用基础规则 (允许 SSH/HTTP/HTTPS)...${NC}"
+ufw default deny incoming
+ufw default allow outgoing
+ufw allow ssh
+ufw allow 80/tcp
+ufw allow 443/tcp
 
-# 处理输入，替换逗号为空格
-ports=$(echo "$ports_input" | tr ',' ' ')
+# 3. 自定义端口
+echo -e "\n${YELLOW}请输入额外放行的端口 (空格分隔, 如 7890 8080):${NC}"
+read -rp "端口列表: " ports
+for port in $ports; do
+    if [[ "$port" =~ ^[0-9]+$ ]]; then
+        ufw allow "$port"
+        echo -e "已放行: $port"
+    fi
+done
 
-if [ -n "$ports" ]; then
-    for port in $ports; do
-        if [[ "$port" =~ ^[0-9]+$ ]]; then
-            sudo ufw allow "$port"/tcp >/dev/null
-            sudo ufw allow "$port"/udp >/dev/null
-            echo -e "${GREEN}已放行端口 $port (TCP/UDP)。${NC}"
+# 4. 启用
+echo -e "${CYAN}正在启用防火墙...${NC}"
+echo "y" | ufw enable
+echo -e "${GREEN}✓ UFW 已启用。${NC}"
+
+# 5. SSH 端口修改 (高级)
+echo -e "\n${RED}=== 高级选项: 修改 SSH 端口 ===${NC}"
+read -rp "是否修改 SSH 默认端口? (y/n): " mod_ssh
+if [[ "$mod_ssh" =~ ^[Yy]$ ]]; then
+    read -rp "输入新端口 (1024-65535): " new_port
+    if [[ "$new_port" =~ ^[0-9]+$ ]] && [ "$new_port" -gt 1024 ]; then
+        # 放行新端口
+        ufw allow "$new_port/tcp"
+        
+        # 修改配置 (使用更安全的 sed)
+        cp /etc/ssh/sshd_config /etc/ssh/sshd_config.bak
+        if grep -q "^Port " /etc/ssh/sshd_config; then
+            sed -i "s/^Port .*/Port $new_port/" /etc/ssh/sshd_config
         else
-            echo -e "${YELLOW}已跳过无效输入: $port${NC}"
+            echo "Port $new_port" >> /etc/ssh/sshd_config
         fi
-    done
-else
-    echo -e "${YELLOW}未输入任何端口，跳过此步骤。${NC}"
-fi
-
-# 3. 启用 UFW
-echo -e "\n${CYAN}正在启用 UFW 防火墙...${NC}"
-sudo ufw --force enable >/dev/null
-
-# 4. 修改 SSH 端口 (可选)
-echo -e "\n${CYAN}是否需要修改 SSH 端口？(y/n)${NC}"
-read -rp "选择 [n]: " ssh_modify
-
-if [[ "$ssh_modify" =~ ^[Yy]$ ]]; then
-    read -rp "请输入新的 SSH 端口 (1025-65535): " new_ssh_port
-    if [[ "$new_ssh_port" =~ ^[0-9]+$ ]] && [ "$new_ssh_port" -gt 1024 ] && [ "$new_ssh_port" -le 65535 ]; then
-        # 修改 sshd_config
-        sudo sed -i "s/^#*Port .*/Port $new_ssh_port/" /etc/ssh/sshd_config
-        echo -e "${GREEN}SSH 配置文件已更新为端口 $new_ssh_port。${NC}"
         
-        # 在防火墙中允许新端口
-        sudo ufw allow "$new_ssh_port"/tcp >/dev/null
-        echo -e "${GREEN}防火墙已放行新 SSH 端口 $new_ssh_port。${NC}"
-        
-        # 重启 SSH 服务
-        sudo systemctl restart sshd
-        echo -e "${GREEN}SSH 服务已重启，新端口已生效。${NC}"
-        echo -e "${YELLOW}请记得使用新端口 ($new_ssh_port) 重新连接！${NC}"
+        echo -e "${GREEN}配置已修改。正在重启 SSH 服务...${NC}"
+        systemctl restart sshd
+        echo -e "${RED}警告: 请不要关闭当前终端！请新开一个终端测试端口 $new_port 是否能连接！${NC}"
     else
-        echo -e "${RED}端口输入无效，未修改 SSH 端口。${NC}"
+        echo "端口无效，跳过。"
     fi
-else
-    echo -e "${CYAN}未修改 SSH 端口。${NC}"
 fi
-
-echo -e "\n${GREEN}UFW 防火墙配置完成。${NC}"

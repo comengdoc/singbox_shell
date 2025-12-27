@@ -1,18 +1,55 @@
 #!/bin/bash
 
-# 定义颜色
+# --- 样式定义 ---
 CYAN='\033[0;36m'
+GREEN='\033[0;32m'
 RED='\033[0;31m'
-NC='\033[0m' # 无颜色
+YELLOW='\033[1;33m'
+NC='\033[0m'
 
-# 检查 sing-box 是否已安装
+# --- 辅助函数：配置 Systemd 权限 ---
+configure_systemd_override() {
+    echo -e "${CYAN}正在配置 Sing-box 服务权限 (Drop-in Override)...${NC}"
+    
+    # 创建 override 目录
+    sudo mkdir -p /etc/systemd/system/sing-box.service.d
+
+    # 写入配置：指定用户和必要的能力(Capability)
+    # AmbientCapabilities 是必须的，否则非 root 用户无法绑定低端口或进行 TProxy
+    cat <<EOF | sudo tee /etc/systemd/system/sing-box.service.d/override.conf > /dev/null
+[Service]
+User=sing-box
+Group=sing-box
+# 允许绑定特权端口和透明代理
+AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_ADMIN CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_NET_ADMIN CAP_NET_RAW
+# 允许写入状态目录
+StateDirectory=sing-box
+StateDirectoryMode=0700
+EOF
+
+    echo -e "${GREEN}✓ Systemd 覆盖配置已创建。${NC}"
+    sudo systemctl daemon-reload
+}
+
+# --- 主逻辑 ---
+
+# 1. 检查安装
 if command -v sing-box &> /dev/null; then
-    echo -e "${CYAN}sing-box 已安装，跳过安装步骤${NC}"
+    current_ver=$(sing-box version | awk '/version/{print $3}')
+    echo -e "${YELLOW}Sing-box 已安装 (v${current_ver})，跳过基础安装。${NC}"
+    # 即使安装了，也要确保权限配置正确
+    if ! id sing-box &>/dev/null; then
+        echo "补全 sing-box 用户..."
+        sudo useradd --system --no-create-home --shell /usr/sbin/nologin sing-box
+    fi
 else
-    # 添加官方 GPG 密钥和仓库
+    # 2. 添加仓库并安装
+    echo -e "${CYAN}正在配置官方源...${NC}"
     sudo mkdir -p /etc/apt/keyrings
     sudo curl -fsSL https://sing-box.app/gpg.key -o /etc/apt/keyrings/sagernet.asc
     sudo chmod a+r /etc/apt/keyrings/sagernet.asc
+    
     echo "Types: deb
 URIs: https://deb.sagernet.org/
 Suites: *
@@ -21,118 +58,50 @@ Enabled: yes
 Signed-By: /etc/apt/keyrings/sagernet.asc
 " | sudo tee /etc/apt/sources.list.d/sagernet.sources > /dev/null
 
-    # 始终更新包列表
-    echo "正在更新包列表，请稍候..."
-    sudo apt-get update -qq > /dev/null 2>&1
+    echo -e "${CYAN}更新软件源...${NC}"
+    sudo apt-get update -qq
 
-    # 选择安装稳定版或测试版
+    # 3. 版本选择
     while true; do
-        read -rp "请选择安装版本(1: 稳定版, 2: 测试版): " version_choice
-        case $version_choice in
-            1)
-                echo "安装稳定版..."
-                sudo apt-get install sing-box -yq > /dev/null 2>&1
-                echo "安装已完成"
-                break
-                ;;
-            2)
-                echo "安装测试版..."
-                sudo apt-get install sing-box-beta -yq > /dev/null 2>&1
-                echo "安装已完成"
-                break
-                ;;
-            *)
-                echo -e "${RED}无效的选择，请输入 1 或 2。${NC}"
-                ;;
+        echo -e "${CYAN}请选择安装版本:${NC}"
+        echo "1. 稳定版 (Stable)"
+        echo "2. 测试版 (Beta)"
+        read -rp "输入数字 (1/2): " v_choice
+        case $v_choice in
+            1) sudo apt-get install sing-box -y; break ;;
+            2) sudo apt-get install sing-box-beta -y; break ;;
+            *) echo -e "${RED}输入无效${NC}" ;;
         esac
     done
+fi
 
-    if command -v sing-box &> /dev/null; then
-        sing_box_version=$(sing-box version | grep 'sing-box version' | awk '{print $3}')
-        echo -e "${CYAN}sing-box 安装成功，版本：${NC} $sing_box_version"
-         
-        if ! id sing-box &>/dev/null; then
-            echo "正在创建 sing-box 系统用户"
-            sudo useradd --system --no-create-home --shell /usr/sbin/nologin sing-box
-        fi
-        echo "正在设置sing-box权限..."
-        sudo mkdir -p /var/lib/sing-box
-        sudo chown -R sing-box:sing-box /var/lib/sing-box
-        sudo chown -R sing-box:sing-box /etc/sing-box
-        sudo chmod 770 /etc/sing-box
-        
-        #if [ -f /etc/sing-box/cache.db ]; then
-        #    sudo chown sing-box:sing-box /etc/sing-box/cache.db
-        #    sudo chmod 660 /etc/sing-box/cache.db
-        #else
-        #    sudo -u sing-box touch /etc/sing-box/cache.db
-        #    sudo chown sing-box:sing-box /etc/sing-box/cache.db
-        #    sudo chmod 660 /etc/sing-box/cache.db
-        #fi
-        # 获取 sing-box 的版本号
-        version_output=$(sing-box version 2>/dev/null)
-        version=$(echo "$version_output" | grep -oE '1\.11\.[0-9]+')
-
-        # 检查是否为 1.11.x 版本
-        if [[ -n "$version" ]]; then
-            echo "检测到 sing-box 版本为 $version"
-
-            service_file="/lib/systemd/system/sing-box.service"
-
-            if [[ -f "$service_file" ]]; then
-                echo "已找到服务文件"
-
-                has_user=$(grep -E '^\s*User=sing-box' "$service_file")
-                has_state=$(grep -E '^\s*StateDirectory=sing-box' "$service_file")
-
-                if [[ -n "$has_user" && -n "$has_state" ]]; then
-                    echo -e "${RED}服务已有无需设置${NC}"
-                else
-                    echo "准备插入缺失配置..."
-
-                    awk -v add_user="$([[ -z "$has_user" ]] && echo 1 || echo 0)" \
-                        -v add_state="$([[ -z "$has_state" ]] && echo 1 || echo 0)" '
-                        BEGIN { in_service=0 }
-                        {
-                            print
-                            if ($0 ~ /^\[Service\]/) {
-                                in_service = 1
-                                next
-                            }
-
-                            if (in_service == 1) {
-                                if (add_user == 1) {
-                                    print "User=sing-box"
-                                    if (add_state == 1) {
-                                        print "StateDirectory=sing-box"
-                                        add_state = 0
-                                    }
-                                    add_user = 0
-                                } else if (add_state == 1 && $0 ~ /^User=sing-box/) {
-                                    print
-                                    print "StateDirectory=sing-box"
-                                    add_state = 0
-                                    next
-                                }
-                            }
-                        }
-                    ' "$service_file" > "${service_file}.tmp" && mv "${service_file}.tmp" "$service_file"
-
-                    echo "修改完成，执行 systemctl daemon-reexec"
-                    systemctl daemon-reexec
-                fi
-            else
-                echo "未找到服务文件：$service_file"
-            fi
-        else
-            echo "当前 sing-box 版本非 1.11.x，跳过处理。"
-    fi 
-        # 重启 sing-box 服务
-        sudo systemctl daemon-reload
-        sudo systemctl restart sing-box
-
-        echo -e "${CYAN}sing-box 服务已重启${NC}"      
-    else
-        echo -e "${RED}sing-box 安装失败，请检查日志或网络配置${NC}"
+# 4. 权限与目录修复 (核心部分)
+if command -v sing-box &> /dev/null; then
+    echo -e "${CYAN}正在修复权限与目录...${NC}"
+    
+    # 确保用户存在
+    if ! id sing-box &>/dev/null; then
+        sudo useradd --system --no-create-home --shell /usr/sbin/nologin sing-box
     fi
+
+    # 修复目录权限
+    for dir in "/var/lib/sing-box" "/etc/sing-box"; do
+        sudo mkdir -p "$dir"
+        sudo chown -R sing-box:sing-box "$dir"
+        sudo chmod 770 "$dir"
+    done
+    
+    # 配置 Systemd
+    configure_systemd_override
+
+    # 重启服务
+    echo -e "${CYAN}正在重启服务...${NC}"
+    if sudo systemctl restart sing-box; then
+        version=$(sing-box version | grep 'sing-box version' | awk '{print $3}')
+        echo -e "${GREEN}Sing-box 安装/配置成功！版本: ${version}${NC}"
+    else
+        echo -e "${RED}服务启动失败，请检查日志: journalctl -u sing-box -e${NC}"
+    fi
+else
+    echo -e "${RED}安装失败！${NC}"
 fi

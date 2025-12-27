@@ -1,144 +1,73 @@
 #!/bin/bash
 
-# 定义颜色
+# --- 样式定义 ---
 CYAN='\033[0;36m'
 GREEN='\033[0;32m'
 RED='\033[0;31m'
-NC='\033[0m' # 无颜色
+NC='\033[0m'
 
-# 手动输入的配置文件
 MANUAL_FILE="/etc/sing-box/manual.conf"
-DEFAULTS_FILE="/etc/sing-box/defaults.conf"
+SCRIPT_DIR="/etc/sing-box/scripts"
 
-# 获取当前模式
-MODE=$(grep -oP '(?<=^MODE=).*' /etc/sing-box/mode.conf)
+echo -e "${CYAN}正在读取订阅配置...${NC}"
 
+if [ ! -f "$MANUAL_FILE" ]; then
+    echo -e "${RED}错误: 未找到配置文件 $MANUAL_FILE${NC}"
+    echo -e "${CYAN}请先运行 [导入订阅] 或 [手动输入] 进行初始化。${NC}"
+    
+    # 引导用户跳转
+    read -rp "是否现在跳转到订阅设置? (y/n): " jump
+    if [[ "$jump" =~ ^[Yy]$ ]]; then
+        bash "$SCRIPT_DIR/manual_input.sh"
+        exit 0
+    else
+        exit 1
+    fi
+fi
 
-prompt_user_input() {
-    while true; do
-        read -rp "请输入后端地址(不填使用默认值): " BACKEND_URL
-        if [ -z "$BACKEND_URL" ]; then
-            BACKEND_URL=$(grep BACKEND_URL "$DEFAULTS_FILE" 2>/dev/null | cut -d'=' -f2-)
-            if [ -z "$BACKEND_URL" ]; then
-                echo -e "${RED}未设置默认值，请在菜单中设置！${NC}"
-                continue
-            fi
-            echo -e "${CYAN}使用默认后端地址: $BACKEND_URL${NC}"
-        fi
-        break
-    done
+# 读取变量
+BACKEND_URL=$(grep BACKEND_URL "$MANUAL_FILE" | cut -d'=' -f2-)
+SUBSCRIPTION_URL=$(grep SUBSCRIPTION_URL "$MANUAL_FILE" | cut -d'=' -f2-)
+TEMPLATE_URL=$(grep TEMPLATE_URL "$MANUAL_FILE" | cut -d'=' -f2-)
 
-    while true; do
-        read -rp "请输入订阅地址(不填使用默认值): " SUBSCRIPTION_URL
-        if [ -z "$SUBSCRIPTION_URL" ]; then
-            SUBSCRIPTION_URL=$(grep SUBSCRIPTION_URL "$DEFAULTS_FILE" 2>/dev/null | cut -d'=' -f2-)
-            if [ -z "$SUBSCRIPTION_URL" ]; then
-                echo -e "${RED}未设置默认值，请在菜单中设置！${NC}"
-                continue
-            fi
-            echo -e "${CYAN}使用默认订阅地址: $SUBSCRIPTION_URL${NC}"
-        fi
-        break
-    done
+if [ -z "$TEMPLATE_URL" ]; then
+    echo -e "${RED}配置不完整，请重新设置订阅。${NC}"
+    exit 1
+fi
 
-    while true; do
-        read -rp "请输入配置文件地址(不填使用默认值): " TEMPLATE_URL
-        if [ -z "$TEMPLATE_URL" ]; then
-            if [ "$MODE" = "TProxy" ]; then
-                TEMPLATE_URL=$(grep TPROXY_TEMPLATE_URL "$DEFAULTS_FILE" 2>/dev/null | cut -d'=' -f2-)
-                if [ -z "$TEMPLATE_URL" ]; then
-                    echo -e "${RED}未设置默认值，请在菜单中设置！${NC}"
-                    continue
-                fi
-                echo -e "${CYAN}使用默认 TProxy 配置文件地址: $TEMPLATE_URL${NC}"
-            elif [ "$MODE" = "TUN" ]; then
-                TEMPLATE_URL=$(grep TUN_TEMPLATE_URL "$DEFAULTS_FILE" 2>/dev/null | cut -d'=' -f2-)
-                if [ -z "$TEMPLATE_URL" ]; then
-                    echo -e "${RED}未设置默认值，请在菜单中设置！${NC}"
-                    continue
-                fi
-                echo -e "${CYAN}使用默认 TUN 配置文件地址: $TEMPLATE_URL${NC}"
-            else
-                echo -e "${RED}未知的模式: $MODE${NC}"
-                exit 1
-            fi
-        fi
-        break
-    done
-}
+# 构造 URL
+if [ -n "$BACKEND_URL" ] && [ -n "$SUBSCRIPTION_URL" ]; then
+    FULL_URL="${BACKEND_URL}/config/${SUBSCRIPTION_URL}&file=${TEMPLATE_URL}"
+else
+    FULL_URL="${TEMPLATE_URL}"
+fi
 
+echo -e "正在从以下地址更新配置:\n${GREEN}$FULL_URL${NC}"
 
-read -rp "是否更换订阅地址？(y/n): " change_subscription
-if [[ "$change_subscription" =~ ^[Yy]$ ]]; then
-    # 执行手动输入相关内容
-    while true; do
-        prompt_user_input
+# 备份
+cp /etc/sing-box/config.json /etc/sing-box/config.json.backup
 
-        echo -e "${CYAN}你输入的配置信息如下:${NC}"
-        echo "后端地址: $BACKEND_URL"
-        echo "订阅地址: $SUBSCRIPTION_URL"
-        echo "配置文件地址: $TEMPLATE_URL"
-
-        read -rp "确认输入的配置信息？(y/n): " confirm_choice
-        if [[ "$confirm_choice" =~ ^[Yy]$ ]]; then
-           
-            cat > "$MANUAL_FILE" <<EOF
-BACKEND_URL=$BACKEND_URL
-SUBSCRIPTION_URL=$SUBSCRIPTION_URL
-TEMPLATE_URL=$TEMPLATE_URL
-EOF
-
-            echo "手动输入的配置已更新"
-            break
+# 下载
+if curl -s -L --connect-timeout 15 --max-time 60 "$FULL_URL" -o /etc/sing-box/config.json; then
+    # 验证
+    if sing-box check -c /etc/sing-box/config.json >/dev/null 2>&1; then
+        echo -e "${GREEN}✓ 配置更新成功。${NC}"
+        
+        echo -e "${CYAN}正在重启 Sing-box...${NC}"
+        sudo systemctl restart sing-box
+        
+        sleep 1
+        if systemctl is-active --quiet sing-box; then
+            echo -e "${GREEN}服务运行正常。${NC}"
         else
-            echo -e "${RED}请重新输入配置信息。${NC}"
+            echo -e "${RED}警告: 服务重启失败，请检查日志。${NC}"
         fi
-    done
-else
-    if [ ! -f "$MANUAL_FILE" ]; then
-        echo -e "${RED}订阅地址为空，请设置！${NC}"
-        exit 1
-    fi
-
-    # 使用现有配置，并输出调试信息
-    BACKEND_URL=$(grep BACKEND_URL "$MANUAL_FILE" 2>/dev/null | cut -d'=' -f2-)
-    SUBSCRIPTION_URL=$(grep SUBSCRIPTION_URL "$MANUAL_FILE" 2>/dev/null | cut -d'=' -f2-)
-    TEMPLATE_URL=$(grep TEMPLATE_URL "$MANUAL_FILE" 2>/dev/null | cut -d'=' -f2-)
-
-    if [ -z "$BACKEND_URL" ] || [ -z "$SUBSCRIPTION_URL" ] || [ -z "$TEMPLATE_URL" ]; then
-        echo -e "${RED}订阅地址为空，请设置！${NC}"
-        exit 1
-    fi
-
-    echo -e "${CYAN}当前配置如下:${NC}"
-    echo "后端地址: $BACKEND_URL"
-    echo "订阅地址: $SUBSCRIPTION_URL"
-    echo "配置文件地址: $TEMPLATE_URL"
-fi
-
-# 构建完整的配置文件URL
-FULL_URL="${BACKEND_URL}/config/${SUBSCRIPTION_URL}&file=${TEMPLATE_URL}"
-echo "生成完整订阅链接: $FULL_URL"
-
-# 备份现有配置文件
-[ -f "/etc/sing-box/config.json" ] && cp /etc/sing-box/config.json /etc/sing-box/config.json.backup
-
-if curl -L --connect-timeout 10 --max-time 30 "$FULL_URL" -o /etc/sing-box/config.json; then
-    echo -e "${GREEN}配置文件更新成功!${NC}"
-    if ! sing-box check -c /etc/sing-box/config.json; then
-        echo -e "${RED}配置文件验证失败，恢复备份...${NC}"
-        [ -f "/etc/sing-box/config.json.backup" ] && cp /etc/sing-box/config.json.backup /etc/sing-box/config.json
+    else
+        echo -e "${RED}✗ 新配置验证失败，正在回滚...${NC}"
+        sing-box check -c /etc/sing-box/config.json
+        cp /etc/sing-box/config.json.backup /etc/sing-box/config.json
     fi
 else
-    echo -e "${RED}配置文件下载失败，恢复备份...${NC}"
-    [ -f "/etc/sing-box/config.json.backup" ] && cp /etc/sing-box/config.json.backup /etc/sing-box/config.json
-fi
-
-# 重启sing-box并检查启动状态
-sudo systemctl restart sing-box
-
-if systemctl is-active --quiet sing-box; then
-    echo -e "${GREEN}sing-box 启动成功${NC}"
-else
-    echo -e "${RED}sing-box 启动失败${NC}"
+    echo -e "${RED}✗ 下载失败，正在回滚...${NC}"
+    cp /etc/sing-box/config.json.backup /etc/sing-box/config.json
 fi

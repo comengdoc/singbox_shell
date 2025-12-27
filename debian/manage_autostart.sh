@@ -1,115 +1,105 @@
 #!/bin/bash
 
-# 定义颜色
+# --- 样式定义 ---
+CYAN='\033[0;36m'
 GREEN='\033[0;32m'
 RED='\033[0;31m'
-NC='\033[0m' # 无颜色
+YELLOW='\033[1;33m'
+NC='\033[0m'
 
-echo -e "${GREEN}设置开机自启动...${NC}"
-echo "请选择操作(1: 启用自启动, 2: 禁用自启动）"
-read -rp "(1/2): " autostart_choice
+SCRIPT_DIR="/etc/sing-box/scripts"
+OVERRIDE_DIR="/etc/systemd/system/sing-box.service.d"
+OVERRIDE_FILE="$OVERRIDE_DIR/override.conf"
 
-apply_firewall() {
-    MODE=$(grep -oP '(?<=^MODE=).*' /etc/sing-box/mode.conf)
-    if [ "$MODE" = "TProxy" ]; then
-        echo "应用 TProxy 模式下的防火墙规则..."
-        bash /etc/sing-box/scripts/configure_tproxy.sh
-    elif [ "$MODE" = "TUN" ]; then
-        echo "应用 TUN 模式下的防火墙规则..."
-        bash /etc/sing-box/scripts/configure_tun.sh
+# 应用防火墙的包装函数 (供 systemd 调用或手动测试)
+apply_firewall_logic() {
+    # 读取模式
+    if [ -f "/etc/sing-box/mode.conf" ]; then
+        MODE=$(grep "^MODE=" /etc/sing-box/mode.conf | cut -d'=' -f2)
     else
-        echo "无效的模式，跳过防火墙规则应用。"
-        exit 1
+        echo "未找到模式配置文件，默认跳过防火墙设置。"
+        exit 0
+    fi
+
+    echo "正在根据模式 ($MODE) 应用防火墙规则..."
+    if [ "$MODE" = "TProxy" ]; then
+        bash "$SCRIPT_DIR/configure_tproxy.sh"
+    elif [ "$MODE" = "TUN" ]; then
+        bash "$SCRIPT_DIR/configure_tun.sh"
+    else
+        echo "当前模式不需要特定的防火墙规则。"
     fi
 }
 
-case $autostart_choice in
+# 供外部调用 (ExecStartPre)
+if [ "$1" = "apply_firewall" ]; then
+    apply_firewall_logic
+    exit $?
+fi
+
+# --- 菜单逻辑 ---
+
+echo -e "${CYAN}=== Sing-box 开机自启与防火墙托管 ===${NC}"
+echo "1. 启用 (Systemd 托管防火墙规则)"
+echo "2. 禁用 (仅保留基础服务)"
+echo "0. 取消"
+read -rp "请选择: " choice
+
+case $choice in
     1)
-        # 检查自启动是否已经开启
-        if systemctl is-enabled sing-box.service >/dev/null 2>&1 && systemctl is-enabled nftables-singbox.service >/dev/null 2>&1; then
-            echo -e "${GREEN}自启动已经开启，无需操作。${NC}"
-            exit 0  # 返回主菜单
-        fi
+        echo -e "${YELLOW}正在配置 Systemd Override...${NC}"
+        
+        # 1. 创建覆盖目录
+        sudo mkdir -p "$OVERRIDE_DIR"
 
-        echo -e "${GREEN}启用自启动...${NC}"
-
-        # 删除旧的配置文件以避免重复配置
-        sudo rm -f /etc/systemd/system/nftables-singbox.service
-
-        # 创建 nftables-singbox.service 文件
-        sudo bash -c 'cat > /etc/systemd/system/nftables-singbox.service <<EOF
+        # 2. 写入覆盖配置
+        # 使用 ExecStartPre 在服务启动前应用防火墙规则
+        # 使用 ExecStopPost 在服务停止后清理规则 (可选，这里暂时保留默认)
+        cat <<EOF | sudo tee "$OVERRIDE_FILE" > /dev/null
 [Unit]
-Description=Apply nftables rules for Sing-Box
-After=network.target
+Description=Sing-box Service with Auto Firewall Rules
+After=network.target network-online.target
 
 [Service]
-ExecStart=/etc/sing-box/scripts/manage_autostart.sh apply_firewall
-Type=oneshot
-RemainAfterExit=yes
-
-[Install]
-WantedBy=multi-user.target
-EOF'
-
-        # 修改 sing-box.service 文件
-        sudo bash -c "sed -i '/After=network.target nss-lookup.target network-online.target/a After=nftables-singbox.service' /usr/lib/systemd/system/sing-box.service"
-        sudo bash -c "sed -i '/^Requires=/d' /usr/lib/systemd/system/sing-box.service"
-        sudo bash -c "sed -i '/
-
-\[Unit\]
-
-/a Requires=nftables-singbox.service' /usr/lib/systemd/system/sing-box.service"
-
-        # 启用并启动服务
+# 启动前自动应用防火墙规则
+ExecStartPre=$SCRIPT_DIR/manage_autostart.sh apply_firewall
+# 赋予必要的网络权限 (以防 install_singbox.sh 没执行到位)
+AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_ADMIN CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_NET_ADMIN CAP_NET_RAW
+EOF
+        
+        # 3. 重载并启用
         sudo systemctl daemon-reload
-        sudo systemctl enable nftables-singbox.service sing-box.service
-        sudo systemctl start nftables-singbox.service sing-box.service
-        cmd_status=$?
-
-        if [ "$cmd_status" -eq 0 ]; then
-            echo -e "${GREEN}自启动已成功启用。${NC}"
-        else
-            echo -e "${RED}启用自启动失败。${NC}"
+        sudo systemctl enable sing-box
+        
+        echo -e "${GREEN}✓ 自启配置已更新。防火墙规则将在每次 sing-box 启动前自动应用。${NC}"
+        
+        # 询问是否立即重启生效
+        read -rp "是否立即重启服务以应用配置? (y/n): " reboot_choice
+        if [[ "$reboot_choice" =~ ^[Yy]$ ]]; then
+            sudo systemctl restart sing-box
+            if systemctl is-active --quiet sing-box; then
+                echo -e "${GREEN}服务重启成功。${NC}"
+            else
+                echo -e "${RED}服务启动失败，请检查日志。${NC}"
+            fi
         fi
         ;;
     2)
-        # 检查自启动是否已经禁用
-        if ! systemctl is-enabled sing-box.service >/dev/null 2>&1 && ! systemctl is-enabled nftables-singbox.service >/dev/null 2>&1; then
-            echo -e "${GREEN}自启动已经禁用，无需操作。${NC}"
-            exit 0  # 返回主菜单
-        fi
-
-        echo -e "${RED}禁用自启动...${NC}"
-        
-        # 禁用并停止服务
-        sudo systemctl disable sing-box.service
-        sudo systemctl disable nftables-singbox.service
-        sudo systemctl stop sing-box.service
-        sudo systemctl stop nftables-singbox.service
-
-        # 删除 nftables-singbox.service 文件
-        sudo rm -f /etc/systemd/system/nftables-singbox.service
-
-        # 还原 sing-box.service 文件
-        sudo bash -c "sed -i '/After=nftables-singbox.service/d' /usr/lib/systemd/system/sing-box.service"
-        sudo bash -c "sed -i '/Requires=nftables-singbox.service/d' /usr/lib/systemd/system/sing-box.service"
-
-        # 重新加载 systemd
-        sudo systemctl daemon-reload
-        cmd_status=$?
-
-        if [ "$cmd_status" -eq 0 ]; then
-            echo -e "${GREEN}自启动已成功禁用。${NC}"
+        echo -e "${YELLOW}正在移除自启托管配置...${NC}"
+        if [ -f "$OVERRIDE_FILE" ]; then
+            sudo rm -f "$OVERRIDE_FILE"
+            sudo systemctl daemon-reload
+            echo -e "${GREEN}✓ 已移除 Systemd Override 配置。${NC}"
+            echo -e "${YELLOW}提示: Sing-box 服务本身仍可能处于 enable 状态，但不会自动加载防火墙规则。${NC}"
         else
-            echo -e "${RED}禁用自启动失败。${NC}"
+            echo -e "${GREEN}未检测到托管配置，无需操作。${NC}"
         fi
+        ;;
+    0)
+        exit 0
         ;;
     *)
-        echo -e "${RED}无效的选择${NC}"
+        echo -e "${RED}无效输入${NC}"
         ;;
 esac
-
-# 调用应用防火墙规则的函数
-if [ "$1" = "apply_firewall" ]; then
-    apply_firewall
-fi

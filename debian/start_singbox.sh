@@ -1,77 +1,75 @@
 #!/bin/bash
 
-# 定义颜色
+# --- 样式定义 ---
 CYAN='\033[0;36m'
 GREEN='\033[0;32m'
 MAGENTA='\033[0;35m'
 RED='\033[0;31m'
-NC='\033[0m' # 无颜色
+YELLOW='\033[1;33m'
+NC='\033[0m'
 
-# 脚本下载目录
 SCRIPT_DIR="/etc/sing-box/scripts"
 
-# 检查当前模式
-check_mode() {
-    if nft list chain inet sing-box prerouting_tproxy &>/dev/null || nft list chain inet sing-box output_tproxy &>/dev/null; then
-        echo "TProxy 模式"
-    else
-        echo "TUN 模式"
-    fi
-}
+# 1. 环境检测 (防止在已有代理的环境下启动导致死循环)
+check_env() {
+    echo -e "${CYAN}正在检查网络环境...${NC}"
+    # 使用 curl 检测是否能直连 Google (以此判断是否处于全局代理下)
+    # 注意：如果本来就没网，这步也会失败。所以仅作为提示。
+    HTTP_CODE=$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 3 "https://www.google.com")
 
-# 应用防火墙规则
-apply_firewall() {
-    MODE=$(grep -oP '(?<=^MODE=).*' /etc/sing-box/mode.conf)
-    if [ "$MODE" = "TProxy" ]; then
-        bash "$SCRIPT_DIR/configure_tproxy.sh"
-    elif [ "$MODE" = "TUN" ]; then
-        bash "$SCRIPT_DIR/configure_tun.sh"
-    fi
-}
-
-# 启动 sing-box 服务
-start_singbox() {
-    echo -e "${CYAN}检测是否处于非代理环境...${NC}"
-    STATUS_CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "https://www.google.com")
-
-    if [ "$STATUS_CODE" -eq 200 ]; then
-        echo -e "${RED}当前网络处于代理环境, 启动 sing-box 需要直连, 请设置!${NC}"
-        read -rp "是否执行网络设置脚本(暂只支持debian)?(y/n/skip): " network_choice
-        if [[ "$network_choice" =~ ^[Yy]$ ]]; then
-            bash "$SCRIPT_DIR/set_network.sh"
-            STATUS_CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "https://www.google.com")
-            if [ "$STATUS_CODE" -eq 200 ]; then
-                echo -e "${RED}网络配置更改后依然处于代理环境，请检查网络配置!${NC}"
-                exit 1
-            fi
-        elif [[ "$network_choice" =~ ^[Ss]kip$ ]]; then
-            echo -e "${CYAN}跳过网络检查，直接启动 sing-box。${NC}"
-        else
-            echo -e "${RED}请切换到非代理环境后再启动 sing-box。${NC}"
-            exit 1
+    if [ "$HTTP_CODE" -eq 200 ]; then
+        echo -e "${YELLOW}警告: 能够直接访问 Google (HTTP 200)。${NC}"
+        echo -e "如果是国内环境，这可能意味着你正在通过另一个代理 (如软路由上级) 上网。"
+        echo -e "在代理环境下启动 sing-box 可能会导致流量回环。"
+        read -rp "是否仍要继续启动? (y/n): " force_start
+        if [[ ! "$force_start" =~ ^[Yy]$ ]]; then
+            exit 0
         fi
-    else
-        echo -e "${CYAN}当前网络环境非代理网络，可以启动 sing-box。${NC}"
     fi
+}
 
-    sudo systemctl restart sing-box &>/dev/null
+# 2. 防火墙应用逻辑
+apply_firewall() {
+    # 检查是否配置了 Systemd 自动托管
+    if [ -f "/etc/systemd/system/sing-box.service.d/override.conf" ]; then
+        echo -e "${GREEN}检测到 Systemd 托管配置，防火墙规则将随服务自动启动。${NC}"
+    else
+        # 手动应用
+        if [ -f "/etc/sing-box/mode.conf" ]; then
+            MODE=$(grep "^MODE=" /etc/sing-box/mode.conf | cut -d'=' -f2)
+            echo -e "${CYAN}正在应用防火墙规则 ($MODE)...${NC}"
+            if [ "$MODE" = "TProxy" ]; then
+                bash "$SCRIPT_DIR/configure_tproxy.sh"
+            elif [ "$MODE" = "TUN" ]; then
+                bash "$SCRIPT_DIR/configure_tun.sh"
+            fi
+        fi
+    fi
+}
+
+# 3. 主启动逻辑
+main() {
+    check_env
     
-    apply_firewall
+    echo -e "${CYAN}正在启动 Sing-box...${NC}"
+    sudo systemctl restart sing-box
 
     if systemctl is-active --quiet sing-box; then
-        echo -e "${GREEN}sing-box 启动成功${NC}"
-        mode=$(check_mode)
-        echo -e "${MAGENTA}当前启动模式: ${mode}${NC}"
+        echo -e "${GREEN}✓ Sing-box 启动成功${NC}"
+        
+        # 应用防火墙 (如果需要手动)
+        apply_firewall
+        
+        # 显示模式
+        if nft list table inet sing-box >/dev/null 2>&1; then
+             echo -e "当前模式: ${MAGENTA}已加载防火墙规则${NC}"
+        else
+             echo -e "当前模式: ${YELLOW}未检测到活动防火墙规则 (可能是纯客户端模式)${NC}"
+        fi
     else
-        echo -e "${RED}sing-box 启动失败，请检查日志${NC}"
+        echo -e "${RED}✗ 启动失败！日志如下:${NC}"
+        sudo journalctl -u sing-box -n 10 --output cat
     fi
 }
 
-# 提示用户确认是否启动
-read -rp "是否启动 sing-box?(y/n): " confirm_start
-if [[ "$confirm_start" =~ ^[Yy]$ ]]; then
-    start_singbox
-else
-    echo -e "${CYAN}已取消启动 sing-box。${NC}"
-    exit 0
-fi
+main

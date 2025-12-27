@@ -1,97 +1,118 @@
 #!/bin/bash
 
 # =================配置区域=================
-# 定义主脚本的下载URL (仅保留Debian/Ubuntu/Armbian版本)
-MAIN_SCRIPT_URL="https://ghfast.top/https://raw.githubusercontent.com/qljsyph/sbshell/refs/heads/main/debian/menu.sh"
- 
-# 脚本下载目录
+# 仓库配置 (统一指向你的仓库)
+REPO_USER="comengdoc"
+REPO_NAME="singbox_shell"
+REPO_BRANCH="main"
+PROXY_URL="https://ghfast.top/"
+
+# 构造下载地址
+BASE_URL="${PROXY_URL}https://raw.githubusercontent.com/${REPO_USER}/${REPO_NAME}/refs/heads/${REPO_BRANCH}/debian"
+MAIN_SCRIPT_URL="${BASE_URL}/menu.sh"
+
+# 安装目录
 SCRIPT_DIR="/etc/sing-box/scripts"
 
-# 定义颜色
+# 颜色定义
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 RED='\033[0;31m'
-NC='\033[0m' # 无颜色
+CYAN='\033[0;36m'
+NC='\033[0m' 
 # =========================================
 
-# 1. 检查是否为 Linux 系统
-if [[ "$(uname -s)" != "Linux" ]]; then
-    echo -e "${RED}当前系统不支持运行此脚本。${NC}"
-    exit 1
-fi
+# 1. 系统检查
+check_sys() {
+    if [[ "$(uname -s)" != "Linux" ]]; then
+        echo -e "${RED}错误：本脚本仅支持 Linux 系统。${NC}"
+        exit 1
+    fi
 
-# 2. 检查发行版 (仅支持 Debian/Ubuntu/Armbian)
-if grep -qi 'debian\|ubuntu\|armbian' /etc/os-release; then
-    echo -e "${GREEN}检测到 Debian/Ubuntu/Armbian 系统，准备运行...${NC}"
-    DEPENDENCIES=("wget" "nftables")
+    if ! grep -qi 'debian\|ubuntu\|armbian' /etc/os-release; then
+        echo -e "${RED}错误：本脚本仅支持 Debian / Ubuntu / Armbian 发行版。${NC}"
+        exit 1
+    fi
+}
 
-    # 3. 检查 sudo 是否安装
-    if ! command -v sudo &> /dev/null; then
-        echo -e "${RED}sudo 未安装。${NC}"
-        read -rp "是否安装 sudo? (y/n): " install_sudo
-        if [[ "$install_sudo" =~ ^[Yy]$ ]]; then
-            apt-get update
-            apt-get install -y sudo
-            if ! command -v sudo &> /dev/null; then
-                echo -e "${RED}安装 sudo 失败，请手动安装 sudo 并重新运行此脚本。${NC}"
-                exit 1
+# 2. 依赖检查与安装
+install_depend() {
+    local dependencies=("wget" "curl" "sudo" "nftables")
+    local need_apt_update=false
+
+    for dep in "${dependencies[@]}"; do
+        if ! command -v "$dep" &> /dev/null && [ "$dep" != "nftables" ]; then
+            echo -e "${YELLOW}正在安装依赖: $dep ...${NC}"
+            if [ "$need_apt_update" = false ]; then
+                sudo apt-get update -y
+                need_apt_update=true
             fi
-            echo -e "${GREEN}sudo 安装成功。${NC}"
+            sudo apt-get install -y "$dep"
+        elif [ "$dep" == "nftables" ] && ! nft --version &> /dev/null; then
+             echo -e "${YELLOW}正在安装依赖: $dep ...${NC}"
+             if [ "$need_apt_update" = false ]; then
+                sudo apt-get update -y
+                need_apt_update=true
+            fi
+            sudo apt-get install -y nftables
+        fi
+    done
+}
+
+# 3. 准备目录
+prepare_dir() {
+    if [ ! -d "$SCRIPT_DIR" ]; then
+        sudo mkdir -p "$SCRIPT_DIR"
+        sudo chown "$(whoami)":"$(whoami)" "$SCRIPT_DIR"
+    fi
+}
+
+# 4. 主逻辑
+main() {
+    clear
+    echo -e "${CYAN}====================================================${NC}"
+    echo -e "${CYAN}      Sing-box Shell 安装引导器 (sbshell)${NC}"
+    echo -e "${CYAN}====================================================${NC}"
+    
+    check_sys
+    install_depend
+    prepare_dir
+
+    # 智能判断：如果 menu.sh 已存在
+    if [ -f "$SCRIPT_DIR/menu.sh" ]; then
+        echo -e "${GREEN}检测到本地已安装脚本。${NC}"
+        echo -e " [1] 直接启动 (默认)"
+        echo -e " [2] 强制更新并重装"
+        read -rp "请选择 (1/2): " choice
+        
+        if [[ "$choice" == "2" ]]; then
+            echo -e "${YELLOW}正在强制更新主脚本...${NC}"
+            rm -f "$SCRIPT_DIR/menu.sh"
         else
-            echo -e "${RED}由于未安装 sudo，脚本无法继续运行。${NC}"
-            exit 1
+            echo -e "${GREEN}正在启动...${NC}"
+            chmod +x "$SCRIPT_DIR/menu.sh"
+            bash "$SCRIPT_DIR/menu.sh"
+            exit 0
         fi
     fi
 
-    # 4. 检查并安装缺失的依赖项 (wget, nftables)
-    for DEP in "${DEPENDENCIES[@]}"; do
-        if [ "$DEP" == "nftables" ]; then
-            CHECK_CMD="nft --version"
-        else
-            CHECK_CMD="wget --version"
-        fi
+    # 下载流程
+    echo -e "${GREEN}正在从 GitHub 下载主脚本...${NC}"
+    echo -e "${CYAN}源地址: ${MAIN_SCRIPT_URL}${NC}"
+    
+    wget -q -O "$SCRIPT_DIR/menu.sh" "$MAIN_SCRIPT_URL"
 
-        if ! $CHECK_CMD &> /dev/null; then
-            echo -e "${RED}$DEP 未安装。${NC}"
-            read -rp "是否安装 $DEP? (y/n): " install_dep
-            if [[ "$install_dep" =~ ^[Yy]$ ]]; then
-                sudo apt-get update
-                sudo apt-get install -y "$DEP"
-                if ! $CHECK_CMD &> /dev/null; then
-                    echo -e "${RED}安装 $DEP 失败，请手动安装 $DEP 并重新运行此脚本。${NC}"
-                    exit 1
-                fi
-                echo -e "${GREEN}$DEP 安装成功。${NC}"
-            else
-                echo -e "${RED}由于未安装 $DEP，脚本无法继续运行。${NC}"
-                exit 1
-            fi
-        fi
-    done
+    if [ ! -f "$SCRIPT_DIR/menu.sh" ] || [ ! -s "$SCRIPT_DIR/menu.sh" ]; then
+        echo -e "${RED}下载失败！请检查网络或代理设置。${NC}"
+        echo -e "${YELLOW}尝试手动访问: $MAIN_SCRIPT_URL${NC}"
+        exit 1
+    fi
 
-else
-    # 非 Debian 系系统直接退出
-    echo -e "${RED}当前系统不是 Debian/Ubuntu/Armbian，不支持运行此脚本。${NC}"
-    exit 1
-fi
+    echo -e "${GREEN}下载成功！${NC}"
+    echo -e "${YELLOW}提示: 安装更新 singbox 尽量使用代理环境，运行 singbox 切记关闭代理!${NC}"
+    
+    chmod +x "$SCRIPT_DIR/menu.sh"
+    bash "$SCRIPT_DIR/menu.sh"
+}
 
-# 5. 确保脚本目录存在并设置权限
-# 统一使用 sudo 创建和设置权限
-sudo mkdir -p "$SCRIPT_DIR"
-sudo chown "$(whoami)":"$(whoami)" "$SCRIPT_DIR"
-
-# 6. 下载主脚本
-echo -e "${GREEN}正在下载主脚本...${NC}"
-wget -q -O "$SCRIPT_DIR/menu.sh" "$MAIN_SCRIPT_URL"
-
-echo -e "${GREEN}脚本下载中，请耐心等待...${NC}"
-echo -e "${YELLOW}注意: 安装更新 singbox 尽量使用代理环境，运行 singbox 切记关闭代理!${NC}"
-
-# 7. 验证下载并执行
-if ! [ -f "$SCRIPT_DIR/menu.sh" ]; then
-    echo -e "${RED}下载主脚本失败，请检查网络连接。${NC}"
-    exit 1
-fi
-
-chmod +x "$SCRIPT_DIR/menu.sh"
-bash "$SCRIPT_DIR/menu.sh"
+main

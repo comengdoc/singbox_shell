@@ -1,151 +1,118 @@
-#!/bin/sh
+#!/bin/bash
 
-# 配置参数
-TPROXY_PORT=7895  # 与 sing-box 中定义的一致
-ROUTING_MARK=666  # 与 sing-box 中定义的一致
+# --- 配置参数 ---
+TPROXY_PORT=7895
+ROUTING_MARK=666
 PROXY_FWMARK=1
 PROXY_ROUTE_TABLE=100
-INTERFACE=$(ip route show default | awk '/default/ {print $5; exit}')
 
-# 保留 IP 地址集合
+# 自动获取默认网卡接口 (更健壮的写法)
+INTERFACE=$(ip -4 route show default | grep default | awk '{print $5}' | head -n 1)
+
+# IP 集合定义
 ReservedIP4='{ 127.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 169.254.0.0/16, 172.16.0.0/12, 192.0.0.0/24, 192.0.2.0/24, 198.51.100.0/24, 192.88.99.0/24, 192.168.0.0/16, 203.0.113.0/24, 224.0.0.0/4, 240.0.0.0/4, 255.255.255.255/32 }'
-CustomBypassIP='{ 192.168.0.0/16, 10.0.0.0/8 }'  # 自定义绕过的 IP 地址集合
+CustomBypassIP='{ 192.168.0.0/16, 10.0.0.0/8 }'
 
-# 读取当前模式
-MODE=$(grep -oP '(?<=^MODE=).*' /etc/sing-box/mode.conf)
+# 颜色
+CYAN='\033[0;36m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m'
 
-# 检查指定路由表是否存在
-check_route_exists() {
-    ip route show table "$1" >/dev/null 2>&1
-    return $?
-}
+# 读取模式 (兼容没有 -P 参数的 grep)
+if [ -f "/etc/sing-box/mode.conf" ]; then
+    MODE=$(grep "^MODE=" /etc/sing-box/mode.conf | cut -d'=' -f2)
+else
+    MODE=""
+fi
 
-# 创建路由表，如果不存在的话
-create_route_table_if_not_exists() {
-    if ! check_route_exists "$PROXY_ROUTE_TABLE"; then
-        echo "路由表不存在，正在创建..."
-        ip route add local default dev "$INTERFACE" table "$PROXY_ROUTE_TABLE" || { echo "创建路由表失败"; exit 1; }
-    fi
-}
-
-# 等待 FIB 表加载完成
-wait_for_fib_table() {
-    i=1
-    while [ $i -le 10 ]; do
-        if ip route show table "$PROXY_ROUTE_TABLE" >/dev/null 2>&1; then
-            return 0
-        fi
-        echo "等待 FIB 表加载中，等待 $i 秒..."
-        i=$((i + 1))
-    done
-    echo "FIB 表加载失败，超出最大重试次数"
-    return 1
-}
-
-# 清理现有 sing-box 防火墙规则
-clearSingboxRules() {
+# 辅助函数：清理旧规则
+clear_singbox_rules() {
+    echo "清理旧的 TProxy 规则..."
     nft list table inet sing-box >/dev/null 2>&1 && nft delete table inet sing-box
     ip rule del fwmark $PROXY_FWMARK lookup $PROXY_ROUTE_TABLE 2>/dev/null
     ip route del local default dev "${INTERFACE}" table $PROXY_ROUTE_TABLE 2>/dev/null
-    echo "清理 sing-box 相关的防火墙规则"
 }
 
-# 仅在 TProxy 模式下应用防火墙规则
 if [ "$MODE" = "TProxy" ]; then
-    echo "应用 TProxy 模式下的防火墙规则..."
-
-    # 创建并确保路由表存在
-    create_route_table_if_not_exists
-
-    # 等待 FIB 表加载完成
-    if ! wait_for_fib_table; then
-        echo "FIB 表准备失败，退出脚本。"
-        exit 1
+    echo -e "${CYAN}正在应用 TProxy 防火墙规则 (接口: $INTERFACE)...${NC}"
+    
+    # 1. 配置 IP 路由
+    # 确保路由表存在
+    if ! ip route show table "$PROXY_ROUTE_TABLE" | grep -q default; then
+        echo "添加本地路由..."
+        ip route add local default dev "$INTERFACE" table "$PROXY_ROUTE_TABLE"
     fi
 
-    # 清理现有规则
-    clearSingboxRules
-
-    # 设置 IP 规则和路由
-    ip -f inet rule add fwmark $PROXY_FWMARK lookup $PROXY_ROUTE_TABLE
-    ip -f inet route add local default dev "${INTERFACE}" table $PROXY_ROUTE_TABLE
+    # 确保策略路由存在
+    if ! ip rule show | grep -q "lookup $PROXY_ROUTE_TABLE"; then
+        echo "添加策略路由规则..."
+        ip rule add fwmark $PROXY_FWMARK lookup $PROXY_ROUTE_TABLE
+    fi
+    
+    # 开启转发
     sysctl -w net.ipv4.ip_forward=1 > /dev/null
 
-    # 确保目录存在
-    sudo mkdir -p /etc/sing-box/nft
-
-    # 设置 TProxy 模式下的 nftables 规则
+    # 2. 配置 Nftables
+    mkdir -p /etc/sing-box/nft
     cat > /etc/sing-box/nft/nftables.conf <<EOF
 table inet sing-box {
     set RESERVED_IPSET {
-        type ipv4_addr
-        flags interval
-        auto-merge
+        type ipv4_addr; flags interval; auto-merge;
         elements = $ReservedIP4
     }
 
     chain prerouting_tproxy {
         type filter hook prerouting priority mangle; policy accept;
-
-        # DNS 请求重定向到本地 TProxy 端口
-        meta l4proto { tcp, udp } th dport 53 tproxy to :$TPROXY_PORT accept
-
-        # 自定义绕过地址
+        
+        # 排除
         ip daddr $CustomBypassIP accept
-
-        # 拒绝访问本地 TProxy 端口
-        fib daddr type local meta l4proto { tcp, udp } th dport $TPROXY_PORT reject with icmpx type host-unreachable
-
-        # 本地地址绕过
         fib daddr type local accept
-
-        # 保留地址绕过
         ip daddr @RESERVED_IPSET accept
 
-        # 优化已建立的 TCP 连接
+        # DNS 劫持
+        meta l4proto { tcp, udp } th dport 53 tproxy to :$TPROXY_PORT accept
+
+        # 防止回环死循环
+        fib daddr type local meta l4proto { tcp, udp } th dport $TPROXY_PORT reject with icmpx type host-unreachable
+        
+        # 现有连接保持
         meta l4proto tcp socket transparent 1 meta mark set $PROXY_FWMARK accept
 
-        # 重定向剩余流量到 TProxy 端口并设置标记
+        # 通用 TProxy 劫持
         meta l4proto { tcp, udp } tproxy to :$TPROXY_PORT meta mark set $PROXY_FWMARK
     }
 
     chain output_tproxy {
         type route hook output priority mangle; policy accept;
-
-        # 放行本地回环接口流量
+        
+        # 排除
         meta oifname "lo" accept
-
-        # 本地 sing-box 发出的流量绕过
         meta mark $ROUTING_MARK accept
-
-        # DNS 请求标记
-        meta l4proto { tcp, udp } th dport 53 meta mark set $PROXY_FWMARK
-
-        # 绕过 NBNS 流量
         udp dport { netbios-ns, netbios-dgm, netbios-ssn } accept
-
-        # 自定义绕过地址
         ip daddr $CustomBypassIP accept
-
-        # 本地地址绕过
         fib daddr type local accept
-
-        # 保留地址绕过
         ip daddr @RESERVED_IPSET accept
 
-        # 标记并重定向剩余流量
+        # DNS 标记
+        meta l4proto { tcp, udp } th dport 53 meta mark set $PROXY_FWMARK
+
+        # 通用标记
         meta l4proto { tcp, udp } meta mark set $PROXY_FWMARK
     }
 }
 EOF
 
-    # 应用防火墙规则和 IP 路由
-    nft -f /etc/sing-box/nft/nftables.conf
+    # 应用规则
+    if nft -f /etc/sing-box/nft/nftables.conf; then
+        echo -e "${GREEN}✓ TProxy 规则已生效。${NC}"
+        # 保存规则 (注意：这会覆盖系统默认规则文件，如果是多服务环境请谨慎)
+        nft list ruleset > /etc/nftables.conf
+    else
+        echo -e "${RED}✗ 规则应用失败！${NC}"
+        exit 1
+    fi
 
-    # 持久化防火墙规则
-    nft list ruleset > /etc/nftables.conf
-
-    echo "TProxy 模式的防火墙规则已应用。"
 else
-    echo "当前模式为 TUN 模式，不需要应用防火墙规则。" >/dev/null 2>&1
+    echo -e "${YELLOW}当前非 TProxy 模式，跳过防火墙配置。${NC}"
 fi
