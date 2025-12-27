@@ -11,7 +11,7 @@ SCRIPT_DIR="/etc/sing-box/scripts"
 OVERRIDE_DIR="/etc/systemd/system/sing-box.service.d"
 OVERRIDE_FILE="$OVERRIDE_DIR/override.conf"
 
-# 应用防火墙的包装函数 (供 systemd 调用或手动测试)
+# 应用防火墙的包装函数 (供 systemd 调用)
 apply_firewall_logic() {
     # 读取模式
     if [ -f "/etc/sing-box/mode.conf" ]; then
@@ -53,22 +53,24 @@ case $choice in
         sudo mkdir -p "$OVERRIDE_DIR"
 
         # 2. 写入覆盖配置
-        # 使用 ExecStartPre 在服务启动前应用防火墙规则
-        # 使用 ExecStopPost 在服务停止后清理规则 (可选，这里暂时保留默认)
+        # 关键点：ExecStartPre 前面的 '+' 号让命令以 root 权限运行，解决权限不足问题
         cat <<EOF | sudo tee "$OVERRIDE_FILE" > /dev/null
 [Unit]
 Description=Sing-box Service with Auto Firewall Rules
 After=network.target network-online.target
 
 [Service]
-# 启动前自动应用防火墙规则
-ExecStartPre=$SCRIPT_DIR/manage_autostart.sh apply_firewall
-# 赋予必要的网络权限 (以防 install_singbox.sh 没执行到位)
+# (+) 强制以 root 权限运行防火墙脚本
+ExecStartPre=+$SCRIPT_DIR/manage_autostart.sh apply_firewall
+# 赋予必要的网络权限
 AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_ADMIN CAP_NET_RAW
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_NET_ADMIN CAP_NET_RAW
 EOF
         
-        # 3. 重载并启用
+        # 3. 赋予脚本执行权限 (防止 203/EXEC 错误)
+        sudo chmod +x "$SCRIPT_DIR/manage_autostart.sh"
+        
+        # 4. 重载并启用
         sudo systemctl daemon-reload
         sudo systemctl enable sing-box
         
@@ -77,11 +79,12 @@ EOF
         # 询问是否立即重启生效
         read -rp "是否立即重启服务以应用配置? (y/n): " reboot_choice
         if [[ "$reboot_choice" =~ ^[Yy]$ ]]; then
+            sudo systemctl stop sing-box
             sudo systemctl restart sing-box
             if systemctl is-active --quiet sing-box; then
                 echo -e "${GREEN}服务重启成功。${NC}"
             else
-                echo -e "${RED}服务启动失败，请检查日志。${NC}"
+                echo -e "${RED}服务启动失败。请运行 [8] 查看日志。${NC}"
             fi
         fi
         ;;
@@ -91,7 +94,6 @@ EOF
             sudo rm -f "$OVERRIDE_FILE"
             sudo systemctl daemon-reload
             echo -e "${GREEN}✓ 已移除 Systemd Override 配置。${NC}"
-            echo -e "${YELLOW}提示: Sing-box 服务本身仍可能处于 enable 状态，但不会自动加载防火墙规则。${NC}"
         else
             echo -e "${GREEN}未检测到托管配置，无需操作。${NC}"
         fi

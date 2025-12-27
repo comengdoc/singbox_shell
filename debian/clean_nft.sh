@@ -1,30 +1,38 @@
 #!/bin/bash
 
+# --- 样式定义 ---
 CYAN='\033[0;36m'
 GREEN='\033[0;32m'
-RED='\033[0;31m'
+YELLOW='\033[1;33m'
 NC='\033[0m'
 
 echo -e "${CYAN}正在停止 Sing-box 服务...${NC}"
 sudo systemctl stop sing-box
 
-if command -v nft &> /dev/null; then
-    echo -e "${CYAN}正在清理 Nftables 规则...${NC}"
-    # 尝试清理 sing-box 专用链（如果存在），或者直接 flush ruleset
-    # 建议直接 flush ruleset 确保干净，但如果有其他服务依赖 nftables 需要小心
-    # 这里为了彻底清理 sing-box 残留，通常 flush ruleset 是 TProxy 模式关闭后的标准操作
-    sudo nft flush ruleset
-    
-    echo -e "${GREEN}✓ 服务已停止，防火墙规则已重置。${NC}"
-else
-    echo -e "${RED}警告: 未找到 nft 命令，无法清理防火墙规则（可能未安装或已卸载）。${NC}"
+echo -e "${CYAN}正在清理 Sing-box 防火墙规则...${NC}"
+
+# 1. 清理 Sing-box 专用表 (TProxy模式主要使用)
+if nft list table inet sing-box >/dev/null 2>&1; then
+    sudo nft delete table inet sing-box
+    echo -e "已删除 table inet sing-box"
 fi
 
-# 额外建议：如果使用了 TProxy，可能还需要清理 ip rule
-# 这里简单检查一下 singbox 相关的策略路由
-if ip rule show | grep -q "fwmark"; then
-    echo -e "${CYAN}检测到残留路由策略，正在清理...${NC}"
-    # 这里的清理逻辑比较激进，假设 fwmark 1 是 singbox 用的
-    # 实际脚本中最好记录下添加了什么 rule，这里暂不自动删除 ip rule 防止误删
-    echo -e "${RED}提示: 如果网络异常，请重启系统以重置路由表。${NC}"
-fi
+# 2. 清理 TUN 模式下的 NAT 规则 (精准清理)
+# 注意：我们不 flush ip nat 表，防止误删 Docker 规则
+# 我们只删除特定的 masquerade 规则 (如果有必要)
+# 但由于 nat 表通常比较复杂，且单纯保留 masquerade 规则对系统无害，
+# 这里选择保留 ip nat 表，以最大程度保护 Docker 环境。
+
+# 3. 清理路由策略 (ip rule/route)
+# 这些是 TProxy 模式残留的，TUN 模式自动清理
+PROXY_FWMARK=1
+PROXY_ROUTE_TABLE=100
+
+while ip rule show | grep -q "lookup $PROXY_ROUTE_TABLE"; do
+    sudo ip rule del fwmark $PROXY_FWMARK lookup $PROXY_ROUTE_TABLE 2>/dev/null
+done
+
+# 尝试删除路由表 (可能报错如果不存在，忽略即可)
+sudo ip route flush table $PROXY_ROUTE_TABLE 2>/dev/null
+
+echo -e "${GREEN}✓ 服务已停止，相关规则已清理 (Docker 规则已保留)。${NC}"
