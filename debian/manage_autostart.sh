@@ -9,7 +9,8 @@ NC='\033[0m'
 
 SCRIPT_DIR="/etc/sing-box/scripts"
 OVERRIDE_DIR="/etc/systemd/system/sing-box.service.d"
-OVERRIDE_FILE="$OVERRIDE_DIR/override.conf"
+# [修复] 改名：使用独立的文件名，不与 install 脚本冲突
+FIREWALL_CONF="$OVERRIDE_DIR/firewall_hook.conf"
 
 # 应用防火墙的包装函数 (供 systemd 调用)
 apply_firewall_logic() {
@@ -47,36 +48,34 @@ read -rp "请选择: " choice
 
 case $choice in
     1)
-        echo -e "${YELLOW}正在配置 Systemd Override...${NC}"
+        echo -e "${YELLOW}正在配置 Systemd 防火墙钩子...${NC}"
         
         # 1. 创建覆盖目录
         sudo mkdir -p "$OVERRIDE_DIR"
 
-        # 2. 写入覆盖配置
-        # 关键点：ExecStartPre 前面的 '+' 号让命令以 root 权限运行，解决权限不足问题
-        cat <<EOF | sudo tee "$OVERRIDE_FILE" > /dev/null
+        # 2. 写入防火墙专用配置 (firewall_hook.conf)
+        # 注意：这里我们不再写入 User=...，因为那是 install_singbox.sh 负责的
+        # systemd 会自动合并这两个文件。
+        cat <<EOF | sudo tee "$FIREWALL_CONF" > /dev/null
 [Unit]
 Description=Sing-box Service with Auto Firewall Rules
 After=network.target network-online.target
 
 [Service]
-# (+) 强制以 root 权限运行防火墙脚本
+# (+) 强制以 root 权限运行防火墙脚本，因为 iptables/nft 需要 root
 ExecStartPre=+$SCRIPT_DIR/manage_autostart.sh apply_firewall
-# 赋予必要的网络权限
-AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_ADMIN CAP_NET_RAW
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_NET_ADMIN CAP_NET_RAW
 EOF
         
-        # 3. 赋予脚本执行权限 (防止 203/EXEC 错误)
+        # 3. 赋予脚本执行权限
         sudo chmod +x "$SCRIPT_DIR/manage_autostart.sh"
         
         # 4. 重载并启用
         sudo systemctl daemon-reload
         sudo systemctl enable sing-box
         
-        echo -e "${GREEN}✓ 自启配置已更新。防火墙规则将在每次 sing-box 启动前自动应用。${NC}"
+        echo -e "${GREEN}✓ 自启配置已更新 (文件: firewall_hook.conf)。${NC}"
+        echo -e "${GREEN}Systemd 将自动合并基础权限与防火墙规则。${NC}"
         
-        # 询问是否立即重启生效
         read -rp "是否立即重启服务以应用配置? (y/n): " reboot_choice
         if [[ "$reboot_choice" =~ ^[Yy]$ ]]; then
             sudo systemctl stop sing-box
@@ -89,13 +88,16 @@ EOF
         fi
         ;;
     2)
-        echo -e "${YELLOW}正在移除自启托管配置...${NC}"
-        if [ -f "$OVERRIDE_FILE" ]; then
-            sudo rm -f "$OVERRIDE_FILE"
+        echo -e "${YELLOW}正在移除防火墙托管配置...${NC}"
+        # 仅删除防火墙钩子，不删除基础 User 配置
+        if [ -f "$FIREWALL_CONF" ]; then
+            sudo rm -f "$FIREWALL_CONF"
             sudo systemctl daemon-reload
-            echo -e "${GREEN}✓ 已移除 Systemd Override 配置。${NC}"
+            echo -e "${GREEN}✓ 已移除防火墙自动加载规则 (firewall_hook.conf)。${NC}"
         else
-            echo -e "${GREEN}未检测到托管配置，无需操作。${NC}"
+            # 兼容旧版本：尝试删除旧的错误文件，但前提是确认它不是只有 User 配置
+            # 为安全起见，这里只清理新定义的文件名
+            echo -e "${GREEN}未检测到防火墙挂钩配置。${NC}"
         fi
         ;;
     0)

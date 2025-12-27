@@ -15,12 +15,12 @@ configure_systemd_override() {
     sudo mkdir -p /etc/systemd/system/sing-box.service.d
 
     # 写入配置：指定用户和必要的能力(Capability)
-    # AmbientCapabilities 是必须的，否则非 root 用户无法绑定低端口或进行 TProxy
+    # 这个文件负责“身份”：我是谁(User)，我能干什么(Capability)
     cat <<EOF | sudo tee /etc/systemd/system/sing-box.service.d/override.conf > /dev/null
 [Service]
 User=sing-box
 Group=sing-box
-# 允许绑定特权端口和透明代理
+# 允许绑定特权端口(80/443)和透明代理
 AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_ADMIN CAP_NET_RAW
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_NET_ADMIN CAP_NET_RAW
 # 允许写入状态目录
@@ -28,7 +28,7 @@ StateDirectory=sing-box
 StateDirectoryMode=0700
 EOF
 
-    echo -e "${GREEN}✓ Systemd 覆盖配置已创建。${NC}"
+    echo -e "${GREEN}✓ Systemd 基础权限配置已创建。${NC}"
     sudo systemctl daemon-reload
 }
 
@@ -37,12 +37,7 @@ EOF
 # 1. 检查安装
 if command -v sing-box &> /dev/null; then
     current_ver=$(sing-box version | awk '/version/{print $3}')
-    echo -e "${YELLOW}Sing-box 已安装 (v${current_ver})，跳过基础安装。${NC}"
-    # 即使安装了，也要确保权限配置正确
-    if ! id sing-box &>/dev/null; then
-        echo "补全 sing-box 用户..."
-        sudo useradd --system --no-create-home --shell /usr/sbin/nologin sing-box
-    fi
+    echo -e "${YELLOW}Sing-box 已安装 (v${current_ver})，执行修复模式。${NC}"
 else
     # 2. 添加仓库并安装
     echo -e "${CYAN}正在配置官方源...${NC}"
@@ -84,23 +79,28 @@ if command -v sing-box &> /dev/null; then
         sudo useradd --system --no-create-home --shell /usr/sbin/nologin sing-box
     fi
 
-    # 修复目录权限
+    # 修复目录权限 (解决 Permission Denied 的关键)
+    # 强制将所有权给 sing-box 用户
     for dir in "/var/lib/sing-box" "/etc/sing-box"; do
-        sudo mkdir -p "$dir"
-        sudo chown -R sing-box:sing-box "$dir"
-        sudo chmod 770 "$dir"
+        if [ -d "$dir" ]; then
+            sudo mkdir -p "$dir"
+            sudo chown -R sing-box:sing-box "$dir"
+            # 配置文件权限设为 644 确保可读，目录 755
+            sudo find "$dir" -type f -exec chmod 644 {} \;
+            sudo find "$dir" -type d -exec chmod 755 {} \;
+        fi
     done
     
-    # 配置 Systemd
+    # 配置 Systemd 基础覆盖文件
     configure_systemd_override
 
     # 重启服务
     echo -e "${CYAN}正在重启服务...${NC}"
     if sudo systemctl restart sing-box; then
         version=$(sing-box version | grep 'sing-box version' | awk '{print $3}')
-        echo -e "${GREEN}Sing-box 安装/配置成功！版本: ${version}${NC}"
+        echo -e "${GREEN}Sing-box 安装/修复成功！版本: ${version}${NC}"
     else
-        echo -e "${RED}服务启动失败，请检查日志: journalctl -u sing-box -e${NC}"
+        echo -e "${RED}服务启动失败，请运行: journalctl -u sing-box -e -n 20${NC}"
     fi
 else
     echo -e "${RED}安装失败！${NC}"
