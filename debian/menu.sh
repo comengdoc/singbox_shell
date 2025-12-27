@@ -3,7 +3,7 @@
 #################################################
 # 描述: Debian/Ubuntu/Armbian 官方sing-box 全自动脚本
 # 维护: comengdoc
-# 版本: 3.1.0 (Optimized)
+# 版本: 3.2.0 (Added Uninstall)
 #################################################
 
 # --- 1. 全局配置 ---
@@ -27,11 +27,11 @@ WHITE='\033[1;37m'
 BOLD='\033[1m'
 NC='\033[0m'
 
-# 脚本清单
+# 脚本清单 (已添加 uninstall.sh)
 SCRIPTS=(
     "menu.sh" "install_singbox.sh" "check_update.sh" "update_scripts.sh" "update_ui.sh"
     "manual_input.sh" "manual_update.sh" "auto_update.sh" "switch_mode.sh" "configure_tproxy.sh" "configure_tun.sh"
-    "update_config.sh" "setup.sh" "ufw.sh"
+    "update_config.sh" "setup.sh" "ufw.sh" "uninstall.sh"
     "start_singbox.sh" "stop_singbox.sh" "manage_autostart.sh" "check_config.sh"
     "check_environment.sh" "set_network.sh" "clean_nft.sh" "kernel.sh" "optimize.sh" "set_defaults.sh" "delaytest.sh" "commands.sh"
 )
@@ -190,11 +190,11 @@ show_client_menu() {
     
     echo -e "\n${BOLD}${LIGHT_PURPLE}[ 服务控制 ]${NC}"
     echo -e "  5. 启动服务                 6. 停止服务"
-    echo -e "  7. 管理开机自启             8. 查看实时日志" # 新增日志查看
+    echo -e "  7. 管理开机自启             8. 查看实时日志" 
     
     echo -e "\n${BOLD}${YELLOW}[ 维护更新 ]${NC}"
     echo -e "  9. 更新内核 (Sing-box)      10. 更新脚本"
-    echo -e "  11. 更新面板 (Yacd/Metacubex)"
+    echo -e "  11. 更新面板 (Yacd/Meta)    ${RED}99. 彻底卸载${NC}"
     
     echo -e "\n${BOLD}${WHITE}[ 系统工具 ]${NC}"
     echo -e "  12. 网络设置                13. 常用命令速查"
@@ -214,6 +214,7 @@ show_server_menu() {
     echo -e "\n${BOLD}${YELLOW}[ 配置维护 ]${NC}"
     echo -e "  6. 更新配置文件             7. 更新内核 (Sing-box)"
     echo -e "  8. 更新本脚本               9. SSL 证书申请"
+    echo -e "  ${RED}99. 彻底卸载${NC}"
     
     echo -e "\n${BOLD}${WHITE}[ 系统优化 ]${NC}"
     echo -e "  10. 更换 XanMod 内核        11. 网络拥塞优化"
@@ -264,6 +265,7 @@ main() {
                 10) run_script "更换内核" "kernel.sh" ;;
                 11) run_script "网络优化" "optimize.sh" ;;
                 12) run_script "配置防火墙" "ufw.sh" ;;
+                99) run_script "彻底卸载" "uninstall.sh" ; exit 0 ;;
                 0) exit 0 ;;
                 *) echo -e "${RED}无效输入${NC}"; sleep 1 ;;
             esac
@@ -286,6 +288,7 @@ main() {
                 13) run_script "命令速查" "commands.sh" ;;
                 14) run_script "更换内核" "kernel.sh" ;;
                 15) run_script "网络优化" "optimize.sh" ;;
+                99) run_script "彻底卸载" "uninstall.sh" ; exit 0 ;;
                 0) exit 0 ;;
                 *) echo -e "${RED}无效输入${NC}"; sleep 1 ;;
             esac
