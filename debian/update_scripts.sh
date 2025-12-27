@@ -16,7 +16,7 @@ REPO_BRANCH="main"
 PROXY_URL="https://ghfast.top/"
 BASE_URL="${PROXY_URL}https://raw.githubusercontent.com/${REPO_USER}/${REPO_NAME}/${REPO_BRANCH}/debian"
 
-# 脚本清单 (确保包含所有新脚本，包括 uninstall.sh)
+# 脚本清单 (已包含 uninstall.sh)
 SCRIPTS=(
     "menu.sh" "sbshell.sh" 
     "install_singbox.sh" "check_environment.sh" "check_update.sh" 

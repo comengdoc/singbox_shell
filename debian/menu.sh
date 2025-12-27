@@ -27,7 +27,7 @@ WHITE='\033[1;37m'
 BOLD='\033[1m'
 NC='\033[0m'
 
-# 脚本清单 (已添加 uninstall.sh)
+# 脚本清单 (已包含 uninstall.sh)
 SCRIPTS=(
     "menu.sh" "install_singbox.sh" "check_update.sh" "update_scripts.sh" "update_ui.sh"
     "manual_input.sh" "manual_update.sh" "auto_update.sh" "switch_mode.sh" "configure_tproxy.sh" "configure_tun.sh"
